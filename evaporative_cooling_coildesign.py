@@ -17,8 +17,9 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak,
-    Image as RLImage
+    Image as RLImage, LongTable
 )
+from reportlab.lib.utils import ImageReader
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
 
@@ -366,10 +367,15 @@ def compute_circuit_distribution(total_tubes: int, circuits: int) -> pd.DataFram
 # ============================================================
 # PDF helpers
 # ============================================================
-def _dict_to_table_data(d: dict, key_col="Parameter", val_col="Value"):
-    data = [[key_col, val_col]]
+def _dict_to_table_data(d: dict, styles, key_col="Parameter", val_col="Value"):
+    """Return a 2-col table where values wrap safely (prevents LayoutError)."""
+    normal = styles["BodyText"]
+    header = styles["Heading6"]
+    data = [[Paragraph(f"<b>{key_col}</b>", header), Paragraph(f"<b>{val_col}</b>", header)]]
     for k, v in d.items():
-        data.append([str(k), str(v)])
+        ks = str(k)
+        vs = str(v)
+        data.append([Paragraph(ks, normal), Paragraph(vs, normal)])
     return data
 
 
@@ -398,6 +404,13 @@ def build_pdf_report(
     profile_rows: int,
     include_schematic: bool
 ) -> bytes:
+    """Build a PDF report that won't crash with ReportLab LayoutError.
+
+    Fixes:
+      - Wraps dict values with Paragraph (prevents unbreakable long strings)
+      - Uses LongTable for big tables (allows page splitting)
+      - Scales schematic image to fit page frame (caps max height)
+    """
     styles = getSampleStyleSheet()
     normal = styles["BodyText"]
     h1 = styles["Heading1"]
@@ -417,16 +430,18 @@ def build_pdf_report(
     story.append(Paragraph(title, h1))
     story.append(Spacer(1, 6))
 
-    def add_section(heading, d):
+    def add_section(heading: str, d: dict):
         story.append(Paragraph(heading, h2))
         story.append(Spacer(1, 4))
-        tbl = Table(_dict_to_table_data(d), colWidths=[70 * mm, 95 * mm])
+        data = _dict_to_table_data(d, styles)
+        tbl = LongTable(data, colWidths=[60 * mm, 105 * mm], repeatRows=1)
         tbl.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8EEF7")),
             ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#FAFAFA")]),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
         ]))
         story.append(tbl)
         story.append(Spacer(1, 10))
@@ -436,8 +451,15 @@ def build_pdf_report(
     if include_schematic and schematic_png:
         story.append(Paragraph("Coil schematic (definition sketch)", h2))
         story.append(Spacer(1, 4))
-        img = RLImage(io.BytesIO(schematic_png))
-        img.drawWidth = 180 * mm
+
+        img_reader = ImageReader(io.BytesIO(schematic_png))
+        iw, ih = img_reader.getSize()
+
+        max_w = 180 * mm
+        max_h = 110 * mm  # critical: cap height to avoid LayoutError
+
+        scale = min(max_w / iw, max_h / ih)
+        img = RLImage(io.BytesIO(schematic_png), width=iw * scale, height=ih * scale)
         story.append(img)
         story.append(Spacer(1, 10))
 
@@ -448,18 +470,23 @@ def build_pdf_report(
     if circuit_df is not None and len(circuit_df) > 0:
         story.append(Paragraph("Circuit Distribution (approx.)", h2))
         story.append(Spacer(1, 4))
-        circuit_data = dataframe_to_pdf_table(circuit_df, max_rows=500)
-        if circuit_data:
-            tbl = Table(circuit_data, repeatRows=1)
-            tbl.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8EEF7")),
-                ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("FONTSIZE", (0, 0), (-1, -1), 8),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ]))
-            story.append(tbl)
-            story.append(Spacer(1, 10))
+
+        df_show = circuit_df.copy()
+        for c in df_show.columns:
+            if pd.api.types.is_numeric_dtype(df_show[c]):
+                df_show[c] = df_show[c].astype(float).round(4)
+
+        data = [list(df_show.columns)] + df_show.astype(str).values.tolist()
+        tbl = LongTable(data, repeatRows=1)
+        tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8EEF7")),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 7),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ]))
+        story.append(tbl)
+        story.append(Spacer(1, 10))
 
     if include_profile and df_profile is not None and len(df_profile) > 0:
         story.append(PageBreak())
@@ -476,12 +503,12 @@ def build_pdf_report(
                 df_show[c] = df_show[c].astype(float).round(4)
 
         data = [list(df_show.columns)] + df_show.astype(str).values.tolist()
-        tbl = Table(data, repeatRows=1)
+        tbl = LongTable(data, repeatRows=1)
         tbl.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8EEF7")),
             ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
             ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, -1), 7),
+            ("FONTSIZE", (0, 0), (-1, -1), 6),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ]))
         story.append(tbl)
