@@ -8,7 +8,7 @@ import streamlit as st
 # Schematic plotting
 # -------------------------
 import matplotlib.pyplot as plt
-from matplotlib.patches import Circle, Rectangle
+from matplotlib.patches import Circle, Rectangle, Arc
 
 # -------------------------
 # PDF generation (ReportLab)
@@ -32,9 +32,9 @@ except Exception:
     COOLPROP_OK = False
 
 
-# =========================
-# Simple psychrometrics (engineering-grade for evaporative equipment sizing)
-# =========================
+# ============================================================
+# Psychrometrics (engineering-grade approximations)
+# ============================================================
 def p_ws_kpa(T_c: float) -> float:
     """Saturation vapor pressure over water (kPa), good for ~0–60°C."""
     return 0.61094 * math.exp((17.625 * T_c) / (T_c + 243.04))
@@ -78,9 +78,9 @@ def air_density_kg_per_m3(T_db: float, w: float, P_kpa: float = 101.325) -> floa
     return rho
 
 
-# =========================
+# ============================================================
 # Fluid properties via CoolProp (Water / MEG / MPG)
-# =========================
+# ============================================================
 def make_process_fluid(fluid_choice: str, glycol_pct: int) -> str:
     """
     CoolProp fluid string:
@@ -99,26 +99,22 @@ def make_process_fluid(fluid_choice: str, glycol_pct: int) -> str:
 
 
 def fluid_props(fluid: str, T_c: float, P_kpa: float = 101.325):
-    """
-    Returns cp (kJ/kg-K), rho (kg/m3), mu (Pa.s), k (W/m-K).
-    """
+    """Returns cp (kJ/kg-K), rho (kg/m3), mu (Pa.s), k (W/m-K)."""
     if not COOLPROP_OK:
         raise RuntimeError("CoolProp not available. Use CoolProp==6.7.0 for Streamlit Python 3.13.")
-
     T_k = T_c + 273.15
     P_pa = P_kpa * 1000.0
-
-    cp = PropsSI("C", "T", T_k, "P", P_pa, fluid) / 1000.0   # kJ/kg-K
-    rho = PropsSI("D", "T", T_k, "P", P_pa, fluid)          # kg/m3
-    mu = PropsSI("V", "T", T_k, "P", P_pa, fluid)           # Pa.s
-    k = PropsSI("L", "T", T_k, "P", P_pa, fluid)            # W/m-K
+    cp = PropsSI("C", "T", T_k, "P", P_pa, fluid) / 1000.0
+    rho = PropsSI("D", "T", T_k, "P", P_pa, fluid)
+    mu = PropsSI("V", "T", T_k, "P", P_pa, fluid)
+    k = PropsSI("L", "T", T_k, "P", P_pa, fluid)
     return cp, rho, mu, k
 
 
-# =========================
-# Heat/mass transfer model (Merkel-style marching)
+# ============================================================
+# Merkel-style marching model
 # dQ = K * dA * (hs(Tw) - ha)
-# =========================
+# ============================================================
 def merkel_required_area(
     Q_kw: float,
     Tw_in: float,
@@ -132,9 +128,6 @@ def merkel_required_area(
     dA_step_m2: float = 0.10,
     max_area_m2: float = 2000.0
 ):
-    """
-    Returns required wetted area (m2), plus marching profile dataframe.
-    """
     if Tw_out_target >= Tw_in:
         raise ValueError("Leaving fluid temperature must be lower than entering temperature.")
 
@@ -143,21 +136,21 @@ def merkel_required_area(
     rho_air = air_density_kg_per_m3(Tdb_in, w_in, P_kpa)
 
     Vdot_air_m3_s = Vdot_air_m3_h / 3600.0
-    m_air = rho_air * Vdot_air_m3_s  # kg/s moist air (good approximation)
+    m_air = rho_air * Vdot_air_m3_s
 
     dT = Tw_in - Tw_out_target
-    m_w = Q_kw / (cp_kj_kgK * dT)  # kg/s because Q=kJ/s, cp=kJ/kgK
+    m_w = Q_kw / (cp_kj_kgK * dT)
 
     A = 0.0
     Tw = Tw_in
-
     rows = []
     step = 0
+
     while Tw > Tw_out_target and A < max_area_m2:
         hs = sat_air_enthalpy_at_T_kj_per_kgda(Tw, P_kpa)
-        drive = max(0.05, hs - h_a)  # avoid zero/negative
+        drive = max(0.05, hs - h_a)
 
-        dQ = K_kg_s_m2 * dA_step_m2 * drive  # kW
+        dQ = K_kg_s_m2 * dA_step_m2 * drive
         h_a_new = h_a + dQ / max(1e-9, m_air)
         Tw_new = Tw - dQ / max(1e-9, (m_w * cp_kj_kgK))
 
@@ -176,15 +169,15 @@ def merkel_required_area(
     return A, m_w, m_air, w_in, rho_air, df
 
 
-# =========================
-# Tube-side hydraulics & convection
-# =========================
+# ============================================================
+# Tube-side hydraulics & convection (simple first-pass)
+# ============================================================
 def reynolds(rho: float, v: float, D: float, mu: float) -> float:
     return rho * v * D / max(mu, 1e-12)
 
 
 def prandtl(cp_kj_kgK: float, mu: float, k_w_mK: float) -> float:
-    cp = cp_kj_kgK * 1000.0  # J/kg-K
+    cp = cp_kj_kgK * 1000.0
     return cp * mu / max(k_w_mK, 1e-12)
 
 
@@ -209,9 +202,9 @@ def dp_darcy(rho: float, v: float, D: float, L: float, mu: float, K_minor: float
     return dp_f + dp_m
 
 
-# =========================
-# Materials list
-# =========================
+# ============================================================
+# Materials list (selection)
+# ============================================================
 TUBE_MATERIALS = {
     "Mild Steel (CS)": {"k_wall_W_mK": 45.0},
     "Stainless Steel 304": {"k_wall_W_mK": 16.0},
@@ -222,72 +215,125 @@ TUBE_MATERIALS = {
 }
 
 
-# =========================
-# Schematic generator (generic coil geometry)
-# =========================
-def draw_coil_schematics(
+# ============================================================
+# Schematics (3 views)
+# 1) Plan view (WIDTH vs DEPTH rows)
+# 2) Side view (DEPTH rows vs HEIGHT)
+# 3) Serpentine (one circuit): headers + passes + U-bends, even/odd rule
+# ============================================================
+def draw_three_views(
     face_W_m: float,
     face_H_m: float,
     rows_depth: int,
     horiz_pitch_mm: float,
     vert_pitch_mm: float,
     Do_mm: float,
+    n_passes_air: int,
+    L_straight_m: float
 ):
-    """
-    Two simple engineering schematics:
-      1) Plan view: width vs depth rows
-      2) Side view: height vs depth rows
-    NOTE: These are geometry/definition sketches, not detailed serpentine routing.
-    """
     rows_depth = max(1, int(rows_depth))
-    Do_m = Do_mm / 1000.0
+    n_passes_air = max(2, int(n_passes_air))
     hp_m = max(1e-6, horiz_pitch_mm / 1000.0)
     vp_m = max(1e-6, vert_pitch_mm / 1000.0)
 
-    # Tube counts based on pitch within face dimensions
     tubes_across = max(1, int(math.floor(face_W_m / hp_m)))
     tubes_high = max(1, int(math.floor(face_H_m / vp_m)))
 
-    # Drawing scales (arbitrary)
-    depth_spacing = 1.0
-    tube_spacing_x = 1.0
-    tube_spacing_y = 1.0
+    r_draw = 0.18
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4))
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 4))
 
-    # ---- PLAN VIEW (Width vs Depth rows) ----
-    # Represent each depth row as a "line" of circles across width
+    # --------------------
+    # View 1: Plan view
+    # --------------------
     for r in range(rows_depth):
-        y = r * depth_spacing
         for c in range(tubes_across):
-            x = c * tube_spacing_x
-            ax1.add_patch(Circle((x, y), radius=0.22, fill=False, linewidth=1.2))
-    # bounding box and labels
-    ax1.add_patch(Rectangle((-0.6, -0.6), (tubes_across - 1) * tube_spacing_x + 1.2, (rows_depth - 1) * depth_spacing + 1.2,
+            ax1.add_patch(Circle((c, r), radius=r_draw, fill=False, linewidth=1.2))
+    ax1.add_patch(Rectangle((-0.5, -0.5), (tubes_across - 1) + 1.0, (rows_depth - 1) + 1.0,
                             fill=False, linewidth=1.0, linestyle="--"))
-    ax1.set_title("Plan view (tube columns across WIDTH; depth rows)")
-    ax1.set_xlabel("Width direction")
-    ax1.set_ylabel("Depth (airflow direction)")
-    ax1.text(0, -1.2, f"Face W = {face_W_m:.3f} m, Pitch (H) = {horiz_pitch_mm:.1f} mm → tubes_across ≈ {tubes_across}", fontsize=9)
-    ax1.text(0, -1.5, f"Rows (depth) = {rows_depth}", fontsize=9)
-    ax1.set_aspect("equal")
+    ax1.set_title("View 1: Plan\n(WIDTH vs DEPTH rows)")
+    ax1.text(0.0, -1.2,
+             f"W={face_W_m:.3f} m, H-pitch={horiz_pitch_mm:.1f} mm → tubes_across={tubes_across}",
+             fontsize=9, ha="left")
+    ax1.text(0.0, -1.55, f"Depth rows={rows_depth}", fontsize=9, ha="left")
+    ax1.set_xlim(-0.8, max(1.0, tubes_across - 1 + 0.8))
+    ax1.set_ylim(-2.0, max(1.0, rows_depth - 1 + 0.8))
+    ax1.set_aspect("equal", adjustable="box")
     ax1.axis("off")
 
-    # ---- SIDE VIEW (Height vs Depth rows) ----
+    # --------------------
+    # View 2: Side view
+    # --------------------
     for r in range(rows_depth):
-        x = r * depth_spacing
         for k in range(tubes_high):
-            y = k * tube_spacing_y
-            ax2.add_patch(Circle((x, y), radius=0.22, fill=False, linewidth=1.2))
-    ax2.add_patch(Rectangle((-0.6, -0.6), (rows_depth - 1) * depth_spacing + 1.2, (tubes_high - 1) * tube_spacing_y + 1.2,
+            ax2.add_patch(Circle((r, k), radius=r_draw, fill=False, linewidth=1.2))
+    ax2.add_patch(Rectangle((-0.5, -0.5), (rows_depth - 1) + 1.0, (tubes_high - 1) + 1.0,
                             fill=False, linewidth=1.0, linestyle="--"))
-    ax2.set_title("Side view (tube stack in HEIGHT; depth rows)")
-    ax2.set_xlabel("Depth (airflow direction)")
-    ax2.set_ylabel("Height direction")
-    ax2.text(-0.4, -1.2, f"Face H = {face_H_m:.3f} m, Pitch (V) = {vert_pitch_mm:.1f} mm → tubes_high ≈ {tubes_high}", fontsize=9)
-    ax2.text(-0.4, -1.5, f"Tube OD = {Do_mm:.1f} mm (schematic circle not to scale)", fontsize=9)
-    ax2.set_aspect("equal")
+    ax2.set_title("View 2: Side\n(DEPTH rows vs HEIGHT)")
+    ax2.text(0.0, -1.2,
+             f"H={face_H_m:.3f} m, V-pitch={vert_pitch_mm:.1f} mm → tubes_high={tubes_high}",
+             fontsize=9, ha="left")
+    ax2.text(0.0, -1.55, f"Tube OD={Do_mm:.1f} mm (schematic)", fontsize=9, ha="left")
+    ax2.set_xlim(-0.8, max(1.0, rows_depth - 1 + 0.8))
+    ax2.set_ylim(-2.0, max(1.0, tubes_high - 1 + 0.8))
+    ax2.set_aspect("equal", adjustable="box")
     ax2.axis("off")
+
+    # --------------------
+    # View 3: One serpentine circuit
+    # Coordinate system:
+    #   x = 0 is header plane (where headers/nozzles are)
+    #   x increases to the U-bend end.
+    #   y is pass index (vertical)
+    # Even passes -> headers on same side.
+    # Odd passes  -> headers opposite sides.
+    # --------------------
+    L = max(0.2, float(L_straight_m))
+    dy = 1.0  # vertical spacing in drawing units
+    y_max = (n_passes_air - 1) * dy
+
+    same_side = (n_passes_air % 2 == 0)
+    hdr_out_side = "Same side" if same_side else "Opposite side"
+
+    # headers (schematic)
+    ax3.plot([0, 0], [-0.5, y_max + 0.5], linewidth=6, alpha=0.7)  # header plane
+
+    # draw serpentine passes
+    for i in range(n_passes_air):
+        y = i * dy
+        if i % 2 == 0:
+            ax3.plot([0, L], [y, y], linewidth=2)  # left -> right
+        else:
+            ax3.plot([L, 0], [y, y], linewidth=2)  # right -> left
+
+        # U-bend between pass i and i+1
+        if i < n_passes_air - 1:
+            y2 = (i + 1) * dy
+            if i % 2 == 0:
+                arc = Arc((L, (y + y2) / 2), width=0.9, height=0.9, angle=0, theta1=270, theta2=90, linewidth=2)
+            else:
+                arc = Arc((0, (y + y2) / 2), width=0.9, height=0.9, angle=0, theta1=90, theta2=270, linewidth=2)
+            ax3.add_patch(arc)
+
+    # mark inlet and outlet header connection points
+    ax3.scatter([0], [0], s=60, zorder=5)
+    ax3.text(0.05, 0, "IN (top/bottom header port)", va="center", fontsize=9)
+
+    out_y = y_max
+    out_x = 0 if same_side else L
+    ax3.scatter([out_x], [out_y], s=60, zorder=5)
+    ax3.text(out_x + (0.05 if out_x == 0 else -0.05), out_y,
+             "OUT", va="center", ha=("left" if out_x == 0 else "right"), fontsize=9)
+
+    ax3.set_title("View 3: One circuit serpentine\nHeaders same side if even passes; opposite if odd")
+    ax3.text(0.0, -1.05, f"N_passes_air={n_passes_air}, U-bends={n_passes_air-1}", fontsize=9, ha="left")
+    ax3.text(0.0, -1.35, f"L_straight={L_straight_m:.3f} m (header plane → U-bend start)", fontsize=9, ha="left")
+    ax3.text(0.0, -1.65, f"Outlet header location: {hdr_out_side}", fontsize=9, ha="left")
+
+    ax3.set_xlim(-0.3, L + 0.3)
+    ax3.set_ylim(-2.0, y_max + 1.0)
+    ax3.set_aspect("auto")
+    ax3.axis("off")
 
     fig.tight_layout()
     return fig, tubes_across, tubes_high
@@ -300,19 +346,14 @@ def fig_to_png_bytes(fig) -> bytes:
     return bio.getvalue()
 
 
-# =========================
+# ============================================================
 # Coil layout helpers
-# =========================
+# ============================================================
 def compute_circuit_distribution(total_tubes: int, circuits: int) -> pd.DataFrame:
-    """
-    Evenly distribute tube pieces across circuits (accounting / debug).
-    """
     circuits = max(1, int(circuits))
     total_tubes = max(0, int(total_tubes))
-
     base = total_tubes // circuits
     rem = total_tubes % circuits
-
     rows = []
     for i in range(circuits):
         n = base + (1 if i < rem else 0)
@@ -322,9 +363,9 @@ def compute_circuit_distribution(total_tubes: int, circuits: int) -> pd.DataFram
     return df
 
 
-# =========================
+# ============================================================
 # PDF helpers
-# =========================
+# ============================================================
 def _dict_to_table_data(d: dict, key_col="Parameter", val_col="Value"):
     data = [[key_col, val_col]]
     for k, v in d.items():
@@ -449,11 +490,11 @@ def build_pdf_report(
     return buf.getvalue()
 
 
-# =========================
+# ============================================================
 # Streamlit UI
-# =========================
+# ============================================================
 st.set_page_config(page_title="Evaporative Cooler Coil Designer", layout="wide")
-st.title("Forced-Draft Evaporative Fluid Cooler — Coil + Fan + Hydraulics (Glycol + CoolProp + PDF Report)")
+st.title("Forced-Draft Evaporative Fluid Cooler — Coil + Fan + Hydraulics (Glycol + CoolProp + PDF)")
 
 if not COOLPROP_OK:
     st.error("CoolProp is not installed. Use CoolProp==6.7.0 in requirements.txt for Streamlit Python 3.13.")
@@ -461,15 +502,13 @@ if not COOLPROP_OK:
 
 st.caption(
     "Flexible coil geometry inputs (rows, circuits, pitches, face size, tube length). "
-    "Sizes required wetted area using a Merkel-style enthalpy marching model (calibratable K). "
-    "Checks coil external area from geometry, estimates tube ΔP and fan power, and generates a PDF report."
+    "Adds 3 schematics: plan + side + one-circuit serpentine with even/odd header rule. "
+    "Sizes required wetted area using a Merkel-style enthalpy marching model (calibratable K), "
+    "checks provided coil area from geometry, estimates tube ΔP and fan power, and generates a PDF report."
 )
 
 tab1, tab2, tab3 = st.tabs(["Inputs + Schematic", "Results", "PDF Report"])
 
-# -------------------------
-# Inputs
-# -------------------------
 with tab1:
     col1, col2, col3 = st.columns(3)
 
@@ -522,36 +561,42 @@ with tab1:
         Do_mm = st.number_input("Tube OD (mm)", min_value=6.0, value=25.4, step=0.5)
         t_mm = st.number_input("Tube thickness (mm)", min_value=0.5, value=2.5, step=0.1)
 
-        rows_depth = st.number_input("Number of rows (depth, airflow direction)", min_value=1, value=6, step=1)
+        rows_depth = st.number_input("Number of rows (DEPTH, airflow direction)", min_value=1, value=6, step=1)
         vert_pitch_mm = st.number_input("Vertical pitch (mm)", min_value=15.0, value=50.0, step=1.0)
         horiz_pitch_mm = st.number_input("Horizontal pitch (mm)", min_value=15.0, value=50.0, step=1.0)
 
         face_W_m = st.number_input("Coil face width (m)", min_value=0.3, value=1.5, step=0.1)
         face_H_m = st.number_input("Coil face height (m)", min_value=0.3, value=1.5, step=0.1)
 
-        tube_length_m = st.number_input("Tube straight length (m)", min_value=0.3, value=1.5, step=0.1)
+        tube_length_m = st.number_input("Tube straight length per piece (m)", min_value=0.3, value=1.5, step=0.1)
         circuits = st.number_input("Number of parallel circuits", min_value=1, value=8, step=1)
+
+        # Serpentine schematic inputs (one-circuit view)
+        n_passes_air = st.number_input("Serpentine passes per circuit (rows in air path)", min_value=2, value=12, step=1)
+        L_straight_m = st.number_input("Straight pass length for serpentine view (m)", min_value=0.2, value=1.5, step=0.1)
 
         hdr_in_mm = st.number_input("Inlet header diameter (mm)", min_value=25.0, value=80.0, step=5.0)
         hdr_out_mm = st.number_input("Outlet header diameter (mm)", min_value=25.0, value=80.0, step=5.0)
 
         K_minor = st.number_input("Minor-loss coefficient per circuit (bends+entry/exit)", min_value=0.0, value=3.0, step=0.5)
 
-    st.subheader("Coil schematic (definition sketch)")
-    fig, tubes_across, tubes_high = draw_coil_schematics(
+    st.subheader("Coil schematic (3 views)")
+    fig, tubes_across, tubes_high = draw_three_views(
         face_W_m=face_W_m,
         face_H_m=face_H_m,
         rows_depth=int(rows_depth),
         horiz_pitch_mm=float(horiz_pitch_mm),
         vert_pitch_mm=float(vert_pitch_mm),
-        Do_mm=float(Do_mm)
+        Do_mm=float(Do_mm),
+        n_passes_air=int(n_passes_air),
+        L_straight_m=float(L_straight_m)
     )
     st.pyplot(fig, use_container_width=True)
     schematic_png = fig_to_png_bytes(fig)
 
     st.caption(
-        f"Calculated tube counts from pitch: tubes_across ≈ {tubes_across}, tubes_high ≈ {tubes_high}. "
-        f"Total straight tube pieces = rows_depth × tubes_across × tubes_high."
+        f"Pitch-based counts: tubes_across≈{tubes_across}, tubes_high≈{tubes_high}. "
+        f"Total straight tube pieces (for area) = rows_depth × tubes_across × tubes_high."
     )
 
 run = st.button("Run Design & Check", type="primary")
@@ -559,30 +604,23 @@ run = st.button("Run Design & Check", type="primary")
 if "results" not in st.session_state:
     st.session_state["results"] = None
 
-# -------------------------
-# Results calculation
-# -------------------------
 with tab2:
     st.subheader("Results")
 
     if not run:
         st.info("Enter inputs in the Inputs tab and click **Run Design & Check**.")
     else:
-        # Fluid properties at mean temp
         T_mean = 0.5 * (Tw_in + Tw_out)
         proc_fluid = make_process_fluid(fluid_choice, glycol_pct)
         cp, rho, mu, k_fluid = fluid_props(proc_fluid, T_mean, P_kpa)
 
-        # Air properties
         w_in = humidity_ratio_from_tdb_twb(Tdb, Twb, P_kpa)
         rho_air = air_density_kg_per_m3(Tdb, w_in, P_kpa)
 
-        # Estimate airflow if needed
         if air_mode == "Estimate from Δh (kJ/kg_da)":
             m_air_est = Q_kw / dh_assumed
             Vdot_air = (m_air_est / rho_air) * 3600.0
 
-        # Merkel required area
         A_req, m_w_auto, m_air, w_in_calc, rho_air_calc, df_profile = merkel_required_area(
             Q_kw=Q_kw,
             Tw_in=Tw_in,
@@ -597,7 +635,6 @@ with tab2:
             max_area_m2=max_area
         )
 
-        # Determine flow
         if flow_mode == "User flow (m³/h)":
             flow_m3_h = user_flow
             m_w = (flow_m3_h * rho) / 3600.0
@@ -607,7 +644,7 @@ with tab2:
             flow_m3_h = (m_w * 3600.0) / max(rho, 1e-9)
             Q_check = Q_kw
 
-        # Tube counts from pitch & face (same as schematic)
+        # Tube counts from pitch & face
         tubes_per_row = tubes_across
         tubes_in_height = tubes_high
         tubes_per_layer = tubes_per_row * tubes_in_height
@@ -624,7 +661,7 @@ with tab2:
         Di_mm = max(0.5, Do_mm - 2.0 * t_mm)
         Di_m = Di_mm / 1000.0
 
-        # Circuit length approximation (straight only)
+        # Circuit length approximation (straight-only estimate)
         L_circuit = L_total / max(int(circuits), 1)
 
         # Internal velocity per circuit
@@ -635,13 +672,11 @@ with tab2:
         A_id = math.pi * (Di_m ** 2) / 4.0
         v_int = flow_per_circuit_m3_s / max(A_id, 1e-12)
 
-        # Reynolds, Prandtl, hi
         Re = reynolds(rho, v_int, Di_m, mu)
         Pr = prandtl(cp, mu, k_fluid)
         Nu = nusselt_dittus_boelter(Re, Pr, heating=False)
         h_i = Nu * k_fluid / max(Di_m, 1e-12)
 
-        # Tube dp per circuit
         dp_pa = dp_darcy(rho, v_int, Di_m, L_circuit, mu, K_minor=K_minor)
 
         # Header velocities (sanity)
@@ -656,12 +691,7 @@ with tab2:
         Vdot_air_m3_s = Vdot_air / 3600.0
         fan_kw = (Vdot_air_m3_s * dP_fan) / max(eta_fan, 1e-9) / 1000.0
 
-        # Area margin
         margin_pct = (A_provided / max(A_req, 1e-9) - 1.0) * 100.0
-
-        # Coil layout summary + circuit distribution
-        avg_pieces_per_circuit = total_tubes / max(int(circuits), 1)
-        length_per_circuit_est_m = L_total / max(int(circuits), 1)
 
         layout_summary = {
             "Rows (depth)": int(rows_depth),
@@ -673,22 +703,22 @@ with tab2:
             "Tubes in height": int(tubes_in_height),
             "Tubes per layer (W×H)": int(tubes_per_layer),
             "Total tube pieces (layers×rows)": int(total_tubes),
-            "Straight tube length per piece (m)": f"{tube_length_m:.3f}",
+            "Tube length per piece (m)": f"{tube_length_m:.3f}",
             "Total straight tube length (m)": f"{L_total:.2f}",
             "Circuits": int(circuits),
-            "Avg tube pieces per circuit": f"{avg_pieces_per_circuit:.2f}",
-            "Estimated straight length per circuit (m)": f"{length_per_circuit_est_m:.2f}",
-            "Total process flow (m³/h)": f"{flow_m3_h:.3f}",
+            "Flow total (m³/h)": f"{flow_m3_h:.3f}",
             "Flow per circuit (m³/h)": f"{flow_per_circuit_m3_h:.3f}",
             "Header inlet diameter (mm)": f"{hdr_in_mm:.1f}",
             "Header outlet diameter (mm)": f"{hdr_out_mm:.1f}",
+            "Serpentine passes per circuit (view)": int(n_passes_air),
+            "Serpentine straight length (view) (m)": f"{L_straight_m:.3f}",
+            "Header same-side rule": "Even passes → same side; Odd passes → opposite sides",
         }
 
         circuit_df = compute_circuit_distribution(total_tubes=total_tubes, circuits=circuits)
         circuit_df["TubeLength_m_est"] = (circuit_df["TubePieces"] * tube_length_m).round(3)
         circuit_df["CircuitFlow_m3_h_est"] = float(flow_per_circuit_m3_h)
 
-        # --- Display key metrics
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Duty (kW)", f"{Q_kw:.2f}")
         c2.metric("Required wetted area (m²)", f"{A_req:.1f}")
@@ -707,7 +737,7 @@ with tab2:
         c9.metric("Process flow (m³/h)", f"{flow_m3_h:.2f}")
         c10.metric("Tubes across width", f"{tubes_per_row:d}")
         c11.metric("Tubes in height", f"{tubes_in_height:d}")
-        c12.metric("Total tubes (straight)", f"{total_tubes:d}")
+        c12.metric("Total tube pieces (straight)", f"{total_tubes:d}")
         st.caption("Tube counts use floor(face dimension / pitch). Adjust face sizes/pitches to hit desired count.")
 
         st.write("### Tube-side Hydraulics (per circuit, first estimate)")
@@ -745,7 +775,6 @@ with tab2:
         with st.expander("Merkel marching profile (last 50 rows)"):
             st.dataframe(df_profile.tail(50), use_container_width=True)
 
-        # Store for PDF tab
         st.session_state["results"] = {
             "inputs_raw": {
                 "unitQ": unitQ,
@@ -781,6 +810,8 @@ with tab2:
                 "hdr_in_mm": hdr_in_mm,
                 "hdr_out_mm": hdr_out_mm,
                 "K_minor": K_minor,
+                "n_passes_air": int(n_passes_air),
+                "L_straight_m": float(L_straight_m),
             },
             "proc_fluid": proc_fluid,
             "cp_kJ_kgK": cp,
@@ -812,9 +843,6 @@ with tab2:
             "schematic_png": schematic_png,
         }
 
-# -------------------------
-# PDF Report tab
-# -------------------------
 with tab3:
     st.subheader("PDF Report Export")
 
@@ -850,11 +878,13 @@ with tab3:
             "Horizontal pitch (mm)": ir["horiz_pitch_mm"],
             "Face W (m)": ir["face_W_m"],
             "Face H (m)": ir["face_H_m"],
-            "Tube straight length (m)": ir["tube_length_m"],
+            "Tube length per piece (m)": ir["tube_length_m"],
             "Circuits": ir["circuits"],
             "Header in (mm)": ir["hdr_in_mm"],
             "Header out (mm)": ir["hdr_out_mm"],
             "Minor loss K per circuit": ir["K_minor"],
+            "Serpentine passes (view)": ir["n_passes_air"],
+            "Serpentine straight length (view) (m)": ir["L_straight_m"],
         }
 
         outputs = {
