@@ -1,5 +1,5 @@
 streamlit==1.37.0
 numpy==2.0.1
 pandas==2.2.2
-CoolProp>=6.7.0
+CoolProp>=7.2.0
 reportlab>=4.0.0
