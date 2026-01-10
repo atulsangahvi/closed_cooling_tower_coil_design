@@ -1,7 +1,17 @@
 import math
+import io
 import numpy as np
 import pandas as pd
 import streamlit as st
+
+# -------------------------
+# PDF generation (ReportLab)
+# -------------------------
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib import colors
 
 # -------------------------
 # CoolProp import
@@ -16,7 +26,7 @@ except Exception:
 # Simple psychrometrics (engineering-grade for evaporative equipment sizing)
 # =========================
 def p_ws_kpa(T_c: float) -> float:
-    """Saturation vapor pressure over water (kPa), good for 0–60°C."""
+    """Saturation vapor pressure over water (kPa), good for ~0–60°C."""
     return 0.61094 * math.exp((17.625 * T_c) / (T_c + 243.04))
 
 def humidity_ratio_from_tdb_twb(T_db: float, T_wb: float, P_kpa: float = 101.325) -> float:
@@ -77,7 +87,7 @@ def fluid_props(fluid: str, T_c: float, P_kpa: float = 101.325):
     Returns cp (kJ/kg-K), rho (kg/m3), mu (Pa.s), k (W/m-K).
     """
     if not COOLPROP_OK:
-        raise RuntimeError("CoolProp is not available. Install CoolProp==6.6.0 in requirements.txt")
+        raise RuntimeError("CoolProp not available. Use CoolProp>=6.7.0 in requirements.txt (Py3.13 wheels).")
 
     T_k = T_c + 273.15
     P_pa = P_kpa * 1000.0
@@ -116,7 +126,7 @@ def merkel_required_area(
     rho_air = air_density_kg_per_m3(Tdb_in, w_in, P_kpa)
 
     Vdot_air_m3_s = Vdot_air_m3_h / 3600.0
-    m_air = rho_air * Vdot_air_m3_s  # kg/s (moist air, good approx)
+    m_air = rho_air * Vdot_air_m3_s  # kg/s moist air (good approximation)
 
     dT = Tw_in - Tw_out_target
     m_w = Q_kw / (cp_kj_kgK * dT)  # kg/s because Q=kJ/s, cp=kJ/kgK
@@ -131,7 +141,6 @@ def merkel_required_area(
         drive = max(0.05, hs - h_a)  # avoid zero/negative drive
 
         dQ = K_kg_s_m2 * dA_step_m2 * drive  # kW
-        # update
         h_a_new = h_a + dQ / max(1e-9, m_air)
         Tw_new = Tw - dQ / max(1e-9, (m_w * cp_kj_kgK))
 
@@ -140,12 +149,12 @@ def merkel_required_area(
         step += 1
         Tw, h_a = Tw_new, h_a_new
 
-        # safety stop if numerics go odd
         if step > 300000:
             break
 
     df = pd.DataFrame(rows, columns=[
-        "step", "Area_m2", "WaterTemp_C", "h_sat_kJkgda", "h_air_kJkgda", "Driving_h", "dQ_step_kW", "m_air_kg_s", "m_w_kg_s"
+        "step", "Area_m2", "WaterTemp_C", "h_sat_kJkgda", "h_air_kJkgda",
+        "Driving_h", "dQ_step_kW", "m_air_kg_s", "m_w_kg_s"
     ])
     return A, m_w, m_air, w_in, rho_air, df
 
@@ -156,22 +165,18 @@ def reynolds(rho: float, v: float, D: float, mu: float) -> float:
     return rho * v * D / max(mu, 1e-12)
 
 def prandtl(cp_kj_kgK: float, mu: float, k_w_mK: float) -> float:
-    # cp in kJ/kgK -> J/kgK
-    cp = cp_kj_kgK * 1000.0
+    cp = cp_kj_kgK * 1000.0  # J/kg-K
     return cp * mu / max(k_w_mK, 1e-12)
 
 def nusselt_dittus_boelter(Re: float, Pr: float, heating: bool = True) -> float:
-    # turbulent internal flow; if cooling of fluid, exponent ~0.3; heating ~0.4
     n = 0.4 if heating else 0.3
     if Re < 3000:
-        # laminar fallback (very rough): Nu ~ 3.66 (fully developed)
         return 3.66
     return 0.023 * (Re ** 0.8) * (Pr ** n)
 
 def friction_factor(Re: float) -> float:
     if Re < 2000:
         return 64.0 / max(Re, 1e-12)
-    # Blasius smooth pipe
     return 0.3164 / (Re ** 0.25)
 
 def dp_darcy(rho: float, v: float, D: float, L: float, mu: float, K_minor: float = 3.0) -> float:
@@ -182,7 +187,7 @@ def dp_darcy(rho: float, v: float, D: float, L: float, mu: float, K_minor: float
     return dp_f + dp_m
 
 # =========================
-# Materials & tube options (for fabrication + wall resistance bookkeeping)
+# Materials list
 # =========================
 TUBE_MATERIALS = {
     "Mild Steel (CS)": {"k_wall_W_mK": 45.0},
@@ -194,21 +199,158 @@ TUBE_MATERIALS = {
 }
 
 # =========================
+# Coil layout helpers
+# =========================
+def compute_circuit_distribution(total_tubes: int, circuits: int) -> pd.DataFrame:
+    """
+    Evenly distribute tube pieces across circuits.
+    This is an accounting / debug distribution (not a serpentine pass layout).
+    """
+    circuits = max(1, int(circuits))
+    total_tubes = max(0, int(total_tubes))
+
+    base = total_tubes // circuits
+    rem = total_tubes % circuits
+
+    rows = []
+    for i in range(circuits):
+        n = base + (1 if i < rem else 0)
+        rows.append([i + 1, n])
+    df = pd.DataFrame(rows, columns=["Circuit#", "TubePieces"])
+    df["Share_%"] = (df["TubePieces"] / max(1, total_tubes) * 100.0).round(2)
+    return df
+
+# =========================
+# PDF helpers
+# =========================
+def _dict_to_table_data(d: dict, key_col="Parameter", val_col="Value"):
+    data = [[key_col, val_col]]
+    for k, v in d.items():
+        data.append([str(k), str(v)])
+    return data
+
+def dataframe_to_pdf_table(df: pd.DataFrame, max_rows: int = 60):
+    if df is None or len(df) == 0:
+        return None
+    df_show = df.copy()
+    if len(df_show) > max_rows:
+        df_show = df_show.head(max_rows)
+    for c in df_show.columns:
+        if pd.api.types.is_numeric_dtype(df_show[c]):
+            df_show[c] = df_show[c].astype(float).round(4)
+    return [list(df_show.columns)] + df_show.astype(str).values.tolist()
+
+def build_pdf_report(
+    title: str,
+    inputs: dict,
+    outputs: dict,
+    intermediates: dict,
+    layout_summary: dict,
+    circuit_df: pd.DataFrame,
+    df_profile: pd.DataFrame,
+    include_profile: bool,
+    profile_rows: int
+) -> bytes:
+    styles = getSampleStyleSheet()
+    normal = styles["BodyText"]
+    h1 = styles["Heading1"]
+    h2 = styles["Heading2"]
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=A4,
+        leftMargin=15 * mm,
+        rightMargin=15 * mm,
+        topMargin=15 * mm,
+        bottomMargin=15 * mm
+    )
+
+    story = []
+    story.append(Paragraph(title, h1))
+    story.append(Spacer(1, 6))
+
+    def add_section(heading, d):
+        story.append(Paragraph(heading, h2))
+        story.append(Spacer(1, 4))
+        tbl = Table(_dict_to_table_data(d), colWidths=[70 * mm, 95 * mm])
+        tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8EEF7")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#FAFAFA")]),
+        ]))
+        story.append(tbl)
+        story.append(Spacer(1, 10))
+
+    add_section("Inputs", inputs)
+    add_section("Key Outputs", outputs)
+    add_section("Intermediate Parameters (debug)", intermediates)
+    add_section("Coil Layout Summary", layout_summary)
+
+    if circuit_df is not None and len(circuit_df) > 0:
+        story.append(Paragraph("Circuit Distribution (approx.)", h2))
+        story.append(Spacer(1, 4))
+        circuit_data = dataframe_to_pdf_table(circuit_df, max_rows=500)
+        if circuit_data:
+            tbl = Table(circuit_data, repeatRows=1)
+            tbl.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8EEF7")),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]))
+            story.append(tbl)
+            story.append(Spacer(1, 10))
+
+    if include_profile and df_profile is not None and len(df_profile) > 0:
+        story.append(PageBreak())
+        story.append(Paragraph("Merkel Marching Profile", h2))
+        story.append(Paragraph(
+            f"Showing last {min(profile_rows, len(df_profile))} rows (of {len(df_profile)} total).",
+            normal
+        ))
+        story.append(Spacer(1, 6))
+
+        df_show = df_profile.tail(profile_rows).copy()
+        for c in df_show.columns:
+            if pd.api.types.is_numeric_dtype(df_show[c]):
+                df_show[c] = df_show[c].astype(float).round(4)
+
+        data = [list(df_show.columns)] + df_show.astype(str).values.tolist()
+        tbl = Table(data, repeatRows=1)
+        tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8EEF7")),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 7),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ]))
+        story.append(tbl)
+
+    doc.build(story)
+    return buf.getvalue()
+
+# =========================
 # Streamlit UI
 # =========================
 st.set_page_config(page_title="Evaporative Cooler Coil Designer", layout="wide")
-st.title("Forced-Draft Evaporative Fluid Cooler — Coil + Fan + Hydraulics Sizing (with Glycol & CoolProp)")
+st.title("Forced-Draft Evaporative Fluid Cooler — Coil + Fan + Hydraulics (Glycol + CoolProp + PDF Report)")
 
 if not COOLPROP_OK:
-    st.error("CoolProp is not installed in this environment. Add CoolProp==6.6.0 to requirements.txt.")
+    st.error("CoolProp is not installed. Use CoolProp>=6.7.0 in requirements.txt.")
     st.stop()
 
 st.caption(
-    "This tool sizes required wetted coil area using a Merkel-style enthalpy marching model (calibratable K). "
-    "Then it checks your coil geometry (tube OD/thickness/pitch/rows/circuits/headers) and estimates tube ΔP and fan power."
+    "Sizes required wetted coil area using a Merkel-style enthalpy marching model (calibratable K). "
+    "Checks coil geometry (tube OD/thickness/pitch/rows/circuits/headers), estimates tube ΔP and fan power, "
+    "and generates a PDF report with all inputs, outputs, and intermediate values."
 )
 
-tab1, tab2, tab3 = st.tabs(["Inputs", "Results", "Calibration Notes"])
+tab1, tab2, tab3 = st.tabs(["Inputs", "Results", "PDF Report"])
 
 # -------------------------
 # Inputs
@@ -220,7 +362,6 @@ with tab1:
         st.subheader("Duty & Process Fluid")
         unitQ = st.radio("Heat rejection unit", ["kW", "kcal/h"], horizontal=True)
         Q_in = st.number_input("Heat rejection", min_value=1.0, value=105.0, step=1.0)
-
         Q_kw = Q_in if unitQ == "kW" else (Q_in * 1.163 / 1000.0)
 
         Tw_in = st.number_input("Process fluid inlet (hot) temp, °C", value=39.0, step=0.5)
@@ -230,7 +371,12 @@ with tab1:
         glycol_pct = st.slider("Glycol concentration (%)", min_value=0, max_value=60, value=0, step=5)
 
         flow_mode = st.radio("Flow input mode", ["Auto (from Q and ΔT)", "User flow (m³/h)"], horizontal=True)
-        user_flow = st.number_input("User flow (m³/h)", value=15.0, step=0.5, disabled=(flow_mode != "User flow (m³/h)"))
+        user_flow = st.number_input(
+            "User flow (m³/h)",
+            value=15.0,
+            step=0.5,
+            disabled=(flow_mode != "User flow (m³/h)")
+        )
 
     with col2:
         st.subheader("Ambient Air (Design)")
@@ -262,7 +408,6 @@ with tab1:
         t_mm = st.number_input("Tube thickness (mm)", min_value=0.5, value=2.5, step=0.1)
 
         rows_depth = st.number_input("Number of rows (depth, airflow direction)", min_value=1, value=6, step=1)
-
         vert_pitch_mm = st.number_input("Vertical pitch (mm)", min_value=15.0, value=50.0, step=1.0)
         horiz_pitch_mm = st.number_input("Horizontal pitch (mm)", min_value=15.0, value=50.0, step=1.0)
 
@@ -280,6 +425,9 @@ with tab1:
 
 run = st.button("Run Design & Check", type="primary")
 
+if "results" not in st.session_state:
+    st.session_state["results"] = None
+
 # -------------------------
 # Results calculation
 # -------------------------
@@ -296,7 +444,6 @@ with tab2:
 
         # Air properties
         w_in = humidity_ratio_from_tdb_twb(Tdb, Twb, P_kpa)
-        h_in = enthalpy_moist_air_kj_per_kgda(Tdb, w_in)
         rho_air = air_density_kg_per_m3(Tdb, w_in, P_kpa)
 
         # Estimate airflow if needed
@@ -330,14 +477,9 @@ with tab2:
             Q_check = Q_kw
 
         # Coil tube count from pitch & face
-        # Tubes across width and height (integer count)
         tubes_per_row = max(1, int(math.floor((face_W_m * 1000.0) / horiz_pitch_mm)))
         tubes_in_height = max(1, int(math.floor((face_H_m * 1000.0) / vert_pitch_mm)))
-
-        # Total tubes per "row layer" = tubes_per_row * tubes_in_height
         tubes_per_layer = tubes_per_row * tubes_in_height
-
-        # Total straight tube pieces = tubes_per_layer * rows_depth
         total_tubes = tubes_per_layer * rows_depth
 
         # Total tube length (straight only)
@@ -351,15 +493,16 @@ with tab2:
         Di_mm = max(0.5, Do_mm - 2.0 * t_mm)
         Di_m = Di_mm / 1000.0
 
-        # Circuit length approximation:
-        # In a real serpentine coil, each circuit passes through multiple rows; for first estimate:
-        L_circuit = L_total / max(circuits, 1)
+        # Circuit length approximation (straight length accounting)
+        L_circuit = L_total / max(int(circuits), 1)
 
         # Internal velocity per circuit
         flow_m3_s = flow_m3_h / 3600.0
-        flow_per_circuit = flow_m3_s / max(circuits, 1)
+        flow_per_circuit_m3_s = flow_m3_s / max(int(circuits), 1)
+        flow_per_circuit_m3_h = flow_per_circuit_m3_s * 3600.0
+
         A_id = math.pi * (Di_m ** 2) / 4.0
-        v_int = flow_per_circuit / max(A_id, 1e-12)
+        v_int = flow_per_circuit_m3_s / max(A_id, 1e-12)
 
         # Reynolds, Prandtl, hi
         Re = reynolds(rho, v_int, Di_m, mu)
@@ -382,12 +525,41 @@ with tab2:
         Vdot_air_m3_s = Vdot_air / 3600.0
         fan_kw = (Vdot_air_m3_s * dP_fan) / max(eta_fan, 1e-9) / 1000.0
 
-        # Pass/fail
+        # Area margin
         margin_pct = (A_provided / max(A_req, 1e-9) - 1.0) * 100.0
+
+        # Coil layout summary + circuit distribution
+        avg_pieces_per_circuit = total_tubes / max(int(circuits), 1)
+        length_per_circuit_est_m = L_total / max(int(circuits), 1)
+
+        layout_summary = {
+            "Rows (depth)": int(rows_depth),
+            "Face width (m)": f"{face_W_m:.3f}",
+            "Face height (m)": f"{face_H_m:.3f}",
+            "Horizontal pitch (mm)": f"{horiz_pitch_mm:.1f}",
+            "Vertical pitch (mm)": f"{vert_pitch_mm:.1f}",
+            "Tubes across width": int(tubes_per_row),
+            "Tubes in height": int(tubes_in_height),
+            "Tubes per layer (W×H)": int(tubes_per_layer),
+            "Total tube pieces (layers×rows)": int(total_tubes),
+            "Straight tube length per piece (m)": f"{tube_length_m:.3f}",
+            "Total straight tube length (m)": f"{L_total:.2f}",
+            "Circuits": int(circuits),
+            "Avg tube pieces per circuit": f"{avg_pieces_per_circuit:.2f}",
+            "Estimated straight length per circuit (m)": f"{length_per_circuit_est_m:.2f}",
+            "Total process flow (m³/h)": f"{flow_m3_h:.3f}",
+            "Flow per circuit (m³/h)": f"{flow_per_circuit_m3_h:.3f}",
+            "Header inlet diameter (mm)": f"{hdr_in_mm:.1f}",
+            "Header outlet diameter (mm)": f"{hdr_out_mm:.1f}",
+        }
+
+        circuit_df = compute_circuit_distribution(total_tubes=total_tubes, circuits=circuits)
+        circuit_df["TubeLength_m_est"] = (circuit_df["TubePieces"] * tube_length_m).round(3)
+        circuit_df["CircuitFlow_m3_h_est"] = float(flow_per_circuit_m3_h)
 
         # --- Display key metrics
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Duty (kW)", f"{Q_kw:.1f}")
+        c1.metric("Duty (kW)", f"{Q_kw:.2f}")
         c2.metric("Required wetted area (m²)", f"{A_req:.1f}")
         c3.metric("Provided coil area (m²)", f"{A_provided:.1f}")
         c4.metric("Area margin (%)", f"{margin_pct:+.1f}")
@@ -405,15 +577,14 @@ with tab2:
         c10.metric("Tubes across width", f"{tubes_per_row:d}")
         c11.metric("Tubes in height", f"{tubes_in_height:d}")
         c12.metric("Total tubes (straight)", f"{total_tubes:d}")
-
-        st.caption("Tube counts are computed as floor(face dimension / pitch). Adjust face sizes/pitches to hit your desired count.")
+        st.caption("Tube counts use floor(face dimension / pitch). Adjust face sizes/pitches to hit desired count.")
 
         st.write("### Tube-side Hydraulics (per circuit, first estimate)")
         c13, c14, c15, c16 = st.columns(4)
         c13.metric("Tube ID (mm)", f"{Di_mm:.2f}")
         c14.metric("Internal velocity (m/s)", f"{v_int:.2f}")
         c15.metric("Re", f"{Re:.0f}")
-        c16.metric("ΔP per circuit (kPa)", f"{dp_pa/1000.0:.1f}")
+        c16.metric("ΔP per circuit (kPa)", f"{dp_pa/1000.0:.2f}")
 
         st.write("### Tube-side Heat Transfer (internal)")
         c17, c18, c19 = st.columns(3)
@@ -425,7 +596,7 @@ with tab2:
         c20, c21 = st.columns(2)
         c20.metric("Inlet header velocity (m/s)", f"{v_hdr_in:.2f}")
         c21.metric("Outlet header velocity (m/s)", f"{v_hdr_out:.2f}")
-        st.caption("Typical good practice: headers ~1–2.5 m/s. Too high = noise/erosion; too low = poor distribution risk.")
+        st.caption("Typical practice: headers ~1–2.5 m/s (context-dependent).")
 
         st.write("### Air & Fan")
         c22, c23, c24, c25 = st.columns(4)
@@ -433,91 +604,172 @@ with tab2:
         c23.metric("Air density (kg/m³)", f"{rho_air_calc:.2f}")
         c24.metric("Fan static (Pa)", f"{dP_fan:.0f}")
         c25.metric("Fan shaft power (kW)", f"{fan_kw:.2f}")
-        st.caption("Select motor with margin (typically 1.25–1.5×) and use VFD for stable leaving water temperature control.")
 
-        # Provide a compact summary table for exporting
-        summary = {
-            "Q_kW": Q_kw,
-            "Tw_in_C": Tw_in,
-            "Tw_out_C": Tw_out,
-            "Tdb_in_C": Tdb,
-            "Twb_in_C": Twb,
-            "Airflow_m3_h": Vdot_air,
-            "K_kg_s_m2": K,
-            "A_required_m2": A_req,
-            "A_provided_m2": A_provided,
-            "Area_margin_pct": margin_pct,
-            "Process_fluid": proc_fluid,
-            "cp_kJ_kgK": cp,
-            "rho_kg_m3": rho,
-            "mu_mPa_s": mu * 1000.0,
-            "k_W_mK": k_fluid,
-            "Flow_m3_h": flow_m3_h,
-            "Tube_OD_mm": Do_mm,
-            "Tube_thickness_mm": t_mm,
-            "Tube_ID_mm": Di_mm,
-            "Rows_depth": rows_depth,
-            "Vert_pitch_mm": vert_pitch_mm,
-            "Horiz_pitch_mm": horiz_pitch_mm,
-            "Face_W_m": face_W_m,
-            "Face_H_m": face_H_m,
-            "Tubes_per_row": tubes_per_row,
-            "Tubes_in_height": tubes_in_height,
-            "Total_tubes": total_tubes,
-            "Tube_straight_length_m": tube_length_m,
-            "Total_tube_length_m": L_total,
-            "Circuits": circuits,
-            "Circuit_length_m_est": L_circuit,
-            "Tube_velocity_m_s": v_int,
-            "Re": Re,
-            "DP_circuit_kPa": dp_pa/1000.0,
-            "Header_in_mm": hdr_in_mm,
-            "Header_out_mm": hdr_out_mm,
-            "Header_v_in_m_s": v_hdr_in,
-            "Header_v_out_m_s": v_hdr_out,
-            "Fan_static_Pa": dP_fan,
-            "Fan_eff": eta_fan,
-            "Fan_power_kW": fan_kw,
-        }
-        df_sum = pd.DataFrame([summary])
-        st.write("### Export")
-        st.download_button(
-            "Download summary CSV",
-            data=df_sum.to_csv(index=False).encode("utf-8"),
-            file_name="evap_fluid_cooler_summary.csv",
-            mime="text/csv"
-        )
+        with st.expander("Coil layout summary (debug)"):
+            st.json(layout_summary)
 
-        with st.expander("Show Merkel marching profile (last 50 rows)"):
+        with st.expander("Circuit distribution table (debug)"):
+            st.dataframe(circuit_df, use_container_width=True)
+
+        with st.expander("Merkel marching profile (last 50 rows)"):
             st.dataframe(df_profile.tail(50), use_container_width=True)
 
+        # Store for PDF tab
+        st.session_state["results"] = {
+            "inputs_raw": {
+                "unitQ": unitQ,
+                "Q_in": Q_in,
+                "Q_kw": Q_kw,
+                "Tw_in": Tw_in,
+                "Tw_out": Tw_out,
+                "fluid_choice": fluid_choice,
+                "glycol_pct": glycol_pct,
+                "flow_mode": flow_mode,
+                "user_flow": user_flow,
+                "P_kpa": P_kpa,
+                "Tdb": Tdb,
+                "Twb": Twb,
+                "air_mode": air_mode,
+                "Vdot_air": Vdot_air,
+                "dh_assumed": dh_assumed,
+                "dP_fan": dP_fan,
+                "eta_fan": eta_fan,
+                "K": K,
+                "dA_step": dA_step,
+                "max_area": max_area,
+                "tube_mat": tube_mat,
+                "Do_mm": Do_mm,
+                "t_mm": t_mm,
+                "rows_depth": rows_depth,
+                "vert_pitch_mm": vert_pitch_mm,
+                "horiz_pitch_mm": horiz_pitch_mm,
+                "face_W_m": face_W_m,
+                "face_H_m": face_H_m,
+                "tube_length_m": tube_length_m,
+                "circuits": circuits,
+                "hdr_in_mm": hdr_in_mm,
+                "hdr_out_mm": hdr_out_mm,
+                "K_minor": K_minor,
+            },
+            "proc_fluid": proc_fluid,
+            "cp_kJ_kgK": cp,
+            "rho_kg_m3": rho,
+            "mu_Pa_s": mu,
+            "k_W_mK": k_fluid,
+            "A_req_m2": A_req,
+            "A_provided_m2": A_provided,
+            "area_margin_pct": margin_pct,
+            "flow_m3_h": flow_m3_h,
+            "m_w_kg_s": m_w,
+            "m_air_kg_s": m_air,
+            "w_in": w_in_calc,
+            "rho_air": rho_air_calc,
+            "Di_mm": Di_mm,
+            "v_int_m_s": v_int,
+            "Re": Re,
+            "Pr": Pr,
+            "Nu": Nu,
+            "h_i_W_m2K": h_i,
+            "dp_circuit_kPa": dp_pa/1000.0,
+            "v_hdr_in_m_s": v_hdr_in,
+            "v_hdr_out_m_s": v_hdr_out,
+            "fan_power_kw": fan_kw,
+            "Q_check_kW": Q_check,
+            "layout_summary": layout_summary,
+            "circuit_df": circuit_df,
+            "df_profile": df_profile,
+        }
+
 # -------------------------
-# Calibration Notes
+# PDF Report tab
 # -------------------------
 with tab3:
-    st.markdown(
-        """
-### What is **K** and why it exists?
+    st.subheader("PDF Report Export")
 
-The Merkel model couples evaporation + convection using an enthalpy driving force.  
-In real equipment, performance depends on spray distribution, wetting, airflow maldistribution, drift eliminator losses, etc.
+    res = st.session_state.get("results", None)
+    if not res:
+        st.info("Run the calculation first (Results tab).")
+    else:
+        include_profile = st.checkbox("Include Merkel marching table in PDF", value=True)
+        profile_rows = st.slider("How many marching rows to include", min_value=20, max_value=500, value=120, step=20)
 
-So we use a **calibratable** coefficient **K (kg/s·m²)**.  
-This is normal OEM practice: you tune K to one known reference unit / test, then reuse it for your standard geometry family.
+        ir = res["inputs_raw"]
 
-### How to calibrate K (recommended)
-1. Take any known unit (even competitor):
-   - known duty (kW)
-   - known WB, water in/out, airflow (or fan size)
-   - known coil geometry (tube length, OD → coil area)
-2. Run the model and adjust **K** until:
-   - `Required area ≈ Provided area` for that unit.
-3. Lock K for that coil family.
+        inputs = {
+            "Heat rejection (kW)": f"{ir['Q_kw']:.3f}",
+            "Process fluid": res["proc_fluid"],
+            "Tw in (°C)": ir["Tw_in"],
+            "Tw out (°C)": ir["Tw_out"],
+            "Air DB (°C)": ir["Tdb"],
+            "Air WB (°C)": ir["Twb"],
+            "Pressure (kPa)": ir["P_kpa"],
+            "Airflow (m³/h)": f"{ir['Vdot_air']:.0f}",
+            "K (kg/s·m²)": ir["K"],
+            "dA step (m²)": ir["dA_step"],
+            "Max area (m²)": ir["max_area"],
+            "Fan ΔP (Pa)": ir["dP_fan"],
+            "Fan η": ir["eta_fan"],
+            "Tube material": ir["tube_mat"],
+            "Tube OD (mm)": ir["Do_mm"],
+            "Tube thickness (mm)": ir["t_mm"],
+            "Rows depth": ir["rows_depth"],
+            "Vertical pitch (mm)": ir["vert_pitch_mm"],
+            "Horizontal pitch (mm)": ir["horiz_pitch_mm"],
+            "Face W (m)": ir["face_W_m"],
+            "Face H (m)": ir["face_H_m"],
+            "Tube straight length (m)": ir["tube_length_m"],
+            "Circuits": ir["circuits"],
+            "Header in (mm)": ir["hdr_in_mm"],
+            "Header out (mm)": ir["hdr_out_mm"],
+            "Minor loss K per circuit": ir["K_minor"],
+        }
 
-### Contract tip
-Always quote performance at:
-- design WB (Dubai 30°C)
-- specified water in/out and flow
-- “clean coil + proper water treatment” condition
-        """
-    )
+        outputs = {
+            "Required coil area (m²)": f"{res['A_req_m2']:.3f}",
+            "Provided coil area (m²)": f"{res['A_provided_m2']:.3f}",
+            "Area margin (%)": f"{res['area_margin_pct']:.2f}",
+            "Process flow (m³/h)": f"{res['flow_m3_h']:.3f}",
+            "Fan power (kW)": f"{res['fan_power_kw']:.3f}",
+            "Tube ΔP per circuit (kPa)": f"{res['dp_circuit_kPa']:.3f}",
+            "Energy check Q_check (kW)": f"{res['Q_check_kW']:.3f}",
+        }
+
+        intermediates = {
+            "cp (kJ/kg·K)": f"{res['cp_kJ_kgK']:.6f}",
+            "ρ (kg/m³)": f"{res['rho_kg_m3']:.3f}",
+            "μ (mPa·s)": f"{res['mu_Pa_s']*1000.0:.6f}",
+            "k (W/m·K)": f"{res['k_W_mK']:.6f}",
+            "m_w (kg/s)": f"{res['m_w_kg_s']:.6f}",
+            "m_air (kg/s)": f"{res['m_air_kg_s']:.6f}",
+            "w_in (kg/kg_da)": f"{res['w_in']:.6f}",
+            "ρ_air (kg/m³)": f"{res['rho_air']:.6f}",
+            "Tube ID (mm)": f"{res['Di_mm']:.3f}",
+            "v_int (m/s)": f"{res['v_int_m_s']:.6f}",
+            "Re": f"{res['Re']:.0f}",
+            "Pr": f"{res['Pr']:.4f}",
+            "Nu": f"{res['Nu']:.2f}",
+            "h_i (W/m²·K)": f"{res['h_i_W_m2K']:.1f}",
+            "Header v_in (m/s)": f"{res['v_hdr_in_m_s']:.3f}",
+            "Header v_out (m/s)": f"{res['v_hdr_out_m_s']:.3f}",
+        }
+
+        pdf_bytes = build_pdf_report(
+            title="Evaporative Fluid Cooler Coil Design Report",
+            inputs=inputs,
+            outputs=outputs,
+            intermediates=intermediates,
+            layout_summary=res["layout_summary"],
+            circuit_df=res["circuit_df"],
+            df_profile=res["df_profile"],
+            include_profile=include_profile,
+            profile_rows=profile_rows
+        )
+
+        st.download_button(
+            label="Download PDF Report",
+            data=pdf_bytes,
+            file_name="evap_fluid_cooler_report.pdf",
+            mime="application/pdf"
+        )
+
+        st.caption("Upload the PDF here anytime; it contains every intermediate value used by the calculation.")
