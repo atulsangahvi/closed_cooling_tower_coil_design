@@ -340,6 +340,168 @@ def draw_three_views(
     return fig, tubes_across, tubes_high
 
 
+
+def _dim_arrow(ax, x0, y0, x1, y1, text, text_offset=(0,0), fontsize=9):
+    ax.annotate("", xy=(x1,y1), xytext=(x0,y0),
+                arrowprops=dict(arrowstyle="<->", lw=1.2))
+    tx=(x0+x1)/2 + text_offset[0]
+    ty=(y0+y1)/2 + text_offset[1]
+    ax.text(tx, ty, text, ha="center", va="center", fontsize=fontsize,
+            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.8))
+
+def draw_ga_with_coil_details(
+    casing_L_m, casing_W_m, casing_H_m,
+    fan_diam_m, eliminator_thk_m, sump_depth_m,
+    face_W_m, face_H_m,
+    rows_depth, horiz_pitch_mm, vert_pitch_mm, depth_pitch_mm, Do_mm,
+    tubes_across, tubes_high,
+    detail_cols=10, detail_rows=10,
+):
+    """GA-style: Top/Side/End + coil pitch detail insets."""
+    casing_L_m=max(0.5,float(casing_L_m))
+    casing_W_m=max(0.3,float(casing_W_m))
+    casing_H_m=max(0.5,float(casing_H_m))
+    fan_diam_m=max(0.2,float(fan_diam_m))
+    eliminator_thk_m=max(0.02,float(eliminator_thk_m))
+    sump_depth_m=max(0.05,float(sump_depth_m))
+
+    rows_depth=max(1,int(rows_depth))
+    Pt=max(1e-6,horiz_pitch_mm/1000.0)
+    Pv=max(1e-6,vert_pitch_mm/1000.0)
+    Pr=max(1e-6,depth_pitch_mm/1000.0)
+    Do=max(1e-6,Do_mm/1000.0)
+
+    margin=0.05
+    coil_x0=0.15*casing_L_m
+    coil_x1=0.80*casing_L_m
+    coil_y0=sump_depth_m + 0.10*casing_H_m
+    coil_y1=coil_y0 + min(face_H_m,0.60*casing_H_m)
+
+    fig=plt.figure(figsize=(15,8))
+    gs=fig.add_gridspec(2,3,height_ratios=[1.1,1.0],width_ratios=[1.2,1.0,1.0],hspace=0.35,wspace=0.25)
+    ax_top=fig.add_subplot(gs[0,0])
+    ax_side=fig.add_subplot(gs[0,1])
+    ax_end=fig.add_subplot(gs[0,2])
+    ax_detA=fig.add_subplot(gs[1,0])
+    ax_detB=fig.add_subplot(gs[1,1])
+    ax_note=fig.add_subplot(gs[1,2])
+
+    # TOP
+    ax_top.add_patch(Rectangle((0,0),casing_L_m,casing_W_m,fill=False,lw=2))
+    coil_w=min(face_W_m,0.70*casing_W_m)
+    coil_w0=0.15*casing_W_m
+    ax_top.add_patch(Rectangle((coil_x0,coil_w0),coil_x1-coil_x0,coil_w,fill=False,lw=1.5,linestyle="--"))
+    ax_top.text(coil_x0,coil_w0+coil_w+0.02,"Coil footprint",fontsize=10,ha="left")
+    spray_y=coil_w0+coil_w+0.03
+    ax_top.plot([coil_x0,coil_x1],[spray_y,spray_y],lw=2)
+    for i in range(8):
+        x=coil_x0+(coil_x1-coil_x0)*(i+0.5)/8.0
+        ax_top.plot([x,x],[spray_y,spray_y+0.015],lw=1)
+    fan_center=(0.92*casing_L_m,0.5*casing_W_m)
+    ax_top.add_patch(Circle(fan_center,radius=0.5*fan_diam_m,fill=False,lw=2))
+    ax_top.text(fan_center[0],fan_center[1],"FAN",ha="center",va="center",fontsize=10)
+    _dim_arrow(ax_top,0,-0.04*casing_W_m,casing_L_m,-0.04*casing_W_m,f"L = {casing_L_m:.2f} m",text_offset=(0,-0.01))
+    _dim_arrow(ax_top,-0.04*casing_L_m,0,-0.04*casing_L_m,casing_W_m,f"W = {casing_W_m:.2f} m",text_offset=(-0.06,0))
+    ax_top.set_title("TOP VIEW (Plan)")
+    ax_top.set_xlim(-margin*casing_L_m,casing_L_m*(1+margin))
+    ax_top.set_ylim(-0.12*casing_W_m,casing_W_m*(1+0.12))
+    ax_top.set_aspect("equal",adjustable="box")
+    ax_top.axis("off")
+
+    # SIDE
+    ax_side.add_patch(Rectangle((0,0),casing_L_m,casing_H_m,fill=False,lw=2))
+    ax_side.plot([0,casing_L_m],[sump_depth_m,sump_depth_m],lw=2)
+    ax_side.text(0.02*casing_L_m,sump_depth_m+0.02,"Sump waterline",fontsize=9,ha="left")
+    ax_side.add_patch(Rectangle((coil_x0,coil_y0),coil_x1-coil_x0,coil_y1-coil_y0,fill=False,lw=1.5,linestyle="--"))
+    de_y0=coil_y1+0.03
+    de_h=min(0.12*casing_H_m,0.20*casing_H_m)
+    ax_side.add_patch(Rectangle((coil_x0,de_y0),coil_x1-coil_x0,de_h,fill=False,lw=1.2))
+    ax_side.text(coil_x0,de_y0+de_h+0.02,"Drift eliminator",fontsize=9,ha="left")
+    fan_x0=0.85*casing_L_m
+    ax_side.add_patch(Rectangle((fan_x0,0.15*casing_H_m),casing_L_m-fan_x0,0.70*casing_H_m,fill=False,lw=1.2))
+    ax_side.add_patch(Circle((0.92*casing_L_m,0.5*casing_H_m),radius=0.5*fan_diam_m,fill=False,lw=2))
+    ax_side.annotate("",xy=(0.92*casing_L_m-0.6*fan_diam_m,0.5*casing_H_m),
+                     xytext=(0.92*casing_L_m+0.6*fan_diam_m,0.5*casing_H_m),
+                     arrowprops=dict(arrowstyle="->",lw=1.2))
+    ax_side.text(0.92*casing_L_m,0.5*casing_H_m+0.06,"Airflow",ha="center",fontsize=9)
+    _dim_arrow(ax_side,0,-0.06*casing_H_m,casing_L_m,-0.06*casing_H_m,f"L = {casing_L_m:.2f} m",text_offset=(0,-0.01))
+    _dim_arrow(ax_side,-0.06*casing_L_m,0,-0.06*casing_L_m,casing_H_m,f"H = {casing_H_m:.2f} m",text_offset=(-0.08,0))
+    ax_side.set_title("SIDE VIEW (Elevation)")
+    ax_side.set_xlim(-margin*casing_L_m,casing_L_m*(1+margin))
+    ax_side.set_ylim(-0.15*casing_H_m,casing_H_m*(1+margin))
+    ax_side.set_aspect("equal",adjustable="box")
+    ax_side.axis("off")
+
+    # END
+    ax_end.add_patch(Rectangle((0,0),casing_W_m,casing_H_m,fill=False,lw=2))
+    coil_face_w=min(face_W_m,0.85*casing_W_m)
+    coil_face_h=min(face_H_m,0.70*casing_H_m)
+    ax_end.add_patch(Rectangle(((casing_W_m-coil_face_w)/2,sump_depth_m+0.10*casing_H_m),
+                               coil_face_w,coil_face_h,fill=False,lw=1.5,linestyle="--"))
+    ax_end.text(casing_W_m/2,sump_depth_m+0.10*casing_H_m+coil_face_h+0.02,"Coil face",ha="center",fontsize=10)
+    _dim_arrow(ax_end,0,-0.06*casing_H_m,casing_W_m,-0.06*casing_H_m,f"W = {casing_W_m:.2f} m",text_offset=(0,-0.01))
+    _dim_arrow(ax_end,-0.08*casing_W_m,0,-0.08*casing_W_m,casing_H_m,f"H = {casing_H_m:.2f} m",text_offset=(-0.10,0))
+    ax_end.set_title("END VIEW")
+    ax_end.set_xlim(-0.15*casing_W_m,casing_W_m*(1+0.10))
+    ax_end.set_ylim(-0.15*casing_H_m,casing_H_m*(1+0.05))
+    ax_end.set_aspect("equal",adjustable="box")
+    ax_end.axis("off")
+
+    # DETAIL A (WIDTH x DEPTH)
+    cols=max(2,min(int(detail_cols),max(2,int(tubes_across))))
+    rws=max(2,min(int(detail_rows),max(2,rows_depth)))
+    r_draw=0.18
+    for r in range(rws):
+        for c in range(cols):
+            ax_detA.add_patch(Circle((c,r),radius=r_draw,fill=False,lw=1.2))
+    ax_detA.add_patch(Rectangle((-0.5,-0.5),cols,rws,fill=False,lw=1.0,linestyle="--"))
+    ax_detA.set_title("DETAIL A: Tube pitch (WIDTH × DEPTH)")
+    _dim_arrow(ax_detA,0,-1.0,1,-1.0,f"Pt = {horiz_pitch_mm:.1f} mm",text_offset=(0,-0.15))
+    _dim_arrow(ax_detA,-1.0,0,-1.0,1,f"Pr = {depth_pitch_mm:.1f} mm",text_offset=(-0.25,0))
+    ax_detA.text(0,-1.55,f"Do = {Do_mm:.1f} mm",fontsize=9,ha="left")
+    ax_detA.text(0,-1.85,f"Tubes across ≈ {int(tubes_across)}",fontsize=9,ha="left")
+    ax_detA.text(0,-2.15,f"Depth rows = {rows_depth}",fontsize=9,ha="left")
+    ax_detA.annotate("Airflow",xy=(cols-0.2,rws/2),xytext=(cols+0.8,rws/2),
+                     arrowprops=dict(arrowstyle="->",lw=1.2),va="center")
+    ax_detA.set_xlim(-1.8,cols+2.0)
+    ax_detA.set_ylim(-2.4,rws+0.6)
+    ax_detA.set_aspect("equal",adjustable="box")
+    ax_detA.axis("off")
+
+    # DETAIL B (HEIGHT x DEPTH)
+    hstack=max(2,min(int(detail_rows),max(2,int(tubes_high))))
+    for r in range(rws):
+        for k in range(hstack):
+            ax_detB.add_patch(Circle((r,k),radius=r_draw,fill=False,lw=1.2))
+    ax_detB.add_patch(Rectangle((-0.5,-0.5),rws,hstack,fill=False,lw=1.0,linestyle="--"))
+    ax_detB.set_title("DETAIL B: Tube pitch (HEIGHT × DEPTH)")
+    _dim_arrow(ax_detB,-1.0,0,-1.0,1,f"Pr = {depth_pitch_mm:.1f} mm",text_offset=(-0.25,0))
+    _dim_arrow(ax_detB,0,0,0,1,f"Pv = {vert_pitch_mm:.1f} mm",text_offset=(-0.6,0))
+    ax_detB.text(0,-1.55,f"Tubes high ≈ {int(tubes_high)}",fontsize=9,ha="left")
+    ax_detB.set_xlim(-1.8,rws+0.8)
+    ax_detB.set_ylim(-2.0,hstack+0.6)
+    ax_detB.set_aspect("equal",adjustable="box")
+    ax_detB.axis("off")
+
+    # NOTE panel
+    ax_note.axis("off")
+    gap_t=max(0.0,(Pt-Do)*1000.0)
+    gap_r=max(0.0,(Pr-Do)*1000.0)
+    gap_v=max(0.0,(Pv-Do)*1000.0)
+    txt=(
+        "COIL GEOMETRY USED IN CALCULATION\n"
+        f"Pt (width pitch)  = {horiz_pitch_mm:.1f} mm | clear gap ≈ {gap_t:.1f} mm\n"
+        f"Pr (depth pitch)  = {depth_pitch_mm:.1f} mm | clear gap ≈ {gap_r:.1f} mm\n"
+        f"Pv (vertical pitch)= {vert_pitch_mm:.1f} mm | clear gap ≈ {gap_v:.1f} mm\n\n"
+        f"Tubes across ≈ {int(tubes_across)} ; Tubes high ≈ {int(tubes_high)} ; Depth rows = {rows_depth}\n"
+        "Total tube pieces (for area) = rows_depth × tubes_across × tubes_high\n"
+        f"Tube OD Do = {Do_mm:.1f} mm"
+    )
+    ax_note.text(0.0,1.0,txt,ha="left",va="top",fontsize=10,family="monospace")
+    fig.suptitle("Evaporative Fluid Cooler — GA Views + Coil Bundle Detail",fontsize=14,y=0.98)
+    return fig
+
+
 def fig_to_png_bytes(fig) -> bytes:
     bio = io.BytesIO()
     fig.savefig(bio, format="png", dpi=200, bbox_inches="tight")
@@ -591,9 +753,21 @@ with tab1:
         rows_depth = st.number_input("Number of rows (DEPTH, airflow direction)", min_value=1, value=6, step=1)
         vert_pitch_mm = st.number_input("Vertical pitch (mm)", min_value=15.0, value=50.0, step=1.0)
         horiz_pitch_mm = st.number_input("Horizontal pitch (mm)", min_value=15.0, value=50.0, step=1.0)
+depth_pitch_mm = st.number_input("Depth/row pitch Pr (mm)", min_value=15.0, value=50.0, step=1.0)
+
 
         face_W_m = st.number_input("Coil face width (m)", min_value=0.3, value=1.5, step=0.1)
         face_H_m = st.number_input("Coil face height (m)", min_value=0.3, value=1.5, step=0.1)
+
+# --- GA / enclosure dimensions (for drawing + quoting) ---
+st.markdown("**GA (overall unit) dimensions for drawing**")
+casing_L_m = st.number_input("Overall unit length L (m)", min_value=0.5, value=max(2.5, face_W_m*2.0), step=0.1)
+casing_W_m = st.number_input("Overall unit width W (m)", min_value=0.3, value=max(1.2, face_W_m*0.9), step=0.1)
+casing_H_m = st.number_input("Overall unit height H (m)", min_value=0.5, value=max(1.8, face_H_m*1.2), step=0.1)
+fan_diam_m = st.number_input("Fan diameter (m)", min_value=0.2, value=0.9, step=0.05)
+eliminator_thk_m = st.number_input("Drift eliminator thickness (m)", min_value=0.02, value=0.15, step=0.01)
+sump_depth_m = st.number_input("Sump depth (m)", min_value=0.05, value=0.30, step=0.05)
+
 
         tube_length_m = st.number_input("Tube straight length per piece (m)", min_value=0.3, value=1.5, step=0.1)
         circuits = st.number_input("Number of parallel circuits", min_value=1, value=8, step=1)
@@ -607,24 +781,74 @@ with tab1:
 
         K_minor = st.number_input("Minor-loss coefficient per circuit (bends+entry/exit)", min_value=0.0, value=3.0, step=0.5)
 
-    st.subheader("Coil schematic (3 views)")
-    fig, tubes_across, tubes_high = draw_three_views(
+    
+# Compute pitch-based tube counts (used for drawings and area model)
+hp_m = max(1e-6, float(horiz_pitch_mm) / 1000.0)
+vp_m = max(1e-6, float(vert_pitch_mm) / 1000.0)
+tubes_across = max(1, int(math.floor(face_W_m / hp_m)))
+tubes_high = max(1, int(math.floor(face_H_m / vp_m)))
+
+st.subheader("Geometry drawing (GA + coil bundle detail)")
+show_ga = st.checkbox("Show GA drawing with coil bundle pitch details", value=True)
+
+if show_ga:
+    fig_ga = draw_ga_with_coil_details(
+        casing_L_m=casing_L_m,
+        casing_W_m=casing_W_m,
+        casing_H_m=casing_H_m,
+        fan_diam_m=fan_diam_m,
+        eliminator_thk_m=eliminator_thk_m,
+        sump_depth_m=sump_depth_m,
         face_W_m=face_W_m,
         face_H_m=face_H_m,
         rows_depth=int(rows_depth),
         horiz_pitch_mm=float(horiz_pitch_mm),
         vert_pitch_mm=float(vert_pitch_mm),
+        depth_pitch_mm=float(depth_pitch_mm),
         Do_mm=float(Do_mm),
-        n_passes_air=int(n_passes_air),
-        L_straight_m=float(L_straight_m)
+        tubes_across=int(tubes_across),
+        tubes_high=int(tubes_high),
+        detail_cols=10,
+        detail_rows=10,
     )
-    st.pyplot(fig, use_container_width=True)
-    schematic_png = fig_to_png_bytes(fig)
+    st.pyplot(fig_ga, use_container_width=True)
+    schematic_png = fig_to_png_bytes(fig_ga)
+else:
+    schematic_png = None
 
-    st.caption(
-        f"Pitch-based counts: tubes_across≈{tubes_across}, tubes_high≈{tubes_high}. "
-        f"Total straight tube pieces (for area) = rows_depth × tubes_across × tubes_high."
-    )
+st.subheader("Notes (model meaning & how to use inputs)")
+st.markdown(
+"""
+### A) Merkel coefficient **K** (units: **kg/s·m²**)
+- Model step uses: **dQ = K · dA · (hₛ(Tw) − hₐ)**  
+  where **(hₛ − hₐ)** is in **kJ/kg dry air**. To produce **kJ/s (= kW)**, **K must be kg/s·m²**.
+- **K is not a W/m²·K heat-transfer coefficient.** It is an overall **mass-transfer coefficient** (empirical).
+- K lumps together: spray wetting, droplet/film contact, air-side transfer, recirculation, and overall evaporative effectiveness.
+- In practice, **calibrate K** using a known unit / vendor performance for a similar spray + airflow arrangement.
+
+**Typical K ranges (rough design guidance):**
+- Poor wetting / uneven spray: **0.0005 – 0.0010**
+- Typical closed-circuit fluid cooler (spray over tube bundle): **0.0010 – 0.0025**
+- Optimized wetting / assist media: **0.0020 – 0.0040**
+- High-performance open cooling tower fill (not a closed-circuit coil): **0.0040 – 0.0070**
+
+---
+
+### B) “Tube length per piece” vs “Straight pass length (serpentine view)”
+**Tube length per piece (area + material + costing):**
+- Physical straight tube piece length used for total metal and area:  
+  **A_provided = π·Do·(total_tube_pieces × tube_length_per_piece)**
+
+**Straight pass length (serpentine view) (one-circuit geometry / hydraulics intuition):**
+- Distance from **header plane → start of U-bend** for one pass in one circuit.
+- Used to understand passes/U-bends and to estimate **per-circuit hydraulic length** in serpentine circuits.
+
+These two can be numerically equal in some designs, but they represent different things:
+- One is for **total coil area & BOM** (whole bundle),
+- One is for **one circuit path** (hydraulics & layout logic).
+"""
+)
+
 
 run = st.button("Run Design & Check", type="primary")
 
