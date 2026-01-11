@@ -205,9 +205,10 @@ def dp_darcy(rho: float, v: float, D: float, L: float, mu: float, K_minor: float
 # ============================================================
 # Utility
 # ============================================================
-def fig_to_png_bytes(fig) -> bytes:
+def fig_to_png_bytes(fig, dpi: int = 150, bbox_inches=None) -> bytes:
     bio = io.BytesIO()
-    fig.savefig(bio, format="png", dpi=220, bbox_inches="tight")
+    # IMPORTANT: avoid bbox_inches='tight' in Streamlit Cloud; it can explode canvas size
+    fig.savefig(bio, format="png", dpi=dpi, bbox_inches=bbox_inches)
     plt.close(fig)
     return bio.getvalue()
 
@@ -659,8 +660,8 @@ with tabs[0]:
         sump_depth=float(sump_depth_m),
         nozzle_count=int(nozzle_count),
     )
-    st.pyplot(fig, use_container_width=True)
-    drawing_png = fig_to_png_bytes(fig)
+    drawing_png = fig_to_png_bytes(fig, dpi=150, bbox_inches=None)
+    st.image(drawing_png, use_column_width=True)
 
     st.markdown(
         f"""
