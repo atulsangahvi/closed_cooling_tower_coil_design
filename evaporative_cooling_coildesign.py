@@ -230,14 +230,24 @@ def compute_circuit_distribution(total_tube_pieces: int, circuits: int) -> pd.Da
 # GA + Coil detail drawing
 # ============================================================
 def _dim_arrow(ax, x1, y1, x2, y2, text, text_offset=(0, 0), fontsize=9):
+    """Dimension arrow helper.
+
+    Important for Streamlit: Streamlit renders figures using `bbox_inches="tight"`.
+    If we place annotations far outside the axes limits (negative coordinates based
+    on large user-entered dimensions), the tight bounding box can explode and
+    Matplotlib will raise "Image size too large".
+
+    So we clip annotations to the axes.
+    """
     ax.annotate(
         "",
         xy=(x1, y1), xytext=(x2, y2),
-        arrowprops=dict(arrowstyle="<->", linewidth=1.2)
+        arrowprops=dict(arrowstyle="<->", linewidth=1.2),
+        clip_on=True,
     )
     tx = (x1 + x2) / 2 + text_offset[0]
     ty = (y1 + y2) / 2 + text_offset[1]
-    ax.text(tx, ty, text, ha="center", va="center", fontsize=fontsize)
+    ax.text(tx, ty, text, ha="center", va="center", fontsize=fontsize, clip_on=True)
 
 
 def draw_ga_and_coil_detail(
@@ -294,8 +304,8 @@ def draw_ga_and_coil_detail(
     ax_top.add_patch(Rectangle((fan_x, 0), casing_L - fan_x, casing_W, fill=False, linewidth=1.5))
     ax_top.text((fan_x + casing_L)/2, casing_W/2, "FAN SECTION", ha="center", va="center", fontsize=9)
 
-    _dim_arrow(ax_top, 0, -0.08*casing_W, casing_L, -0.08*casing_W, f"L={casing_L:.2f} m", text_offset=(0, -0.04*casing_W))
-    _dim_arrow(ax_top, -0.08*casing_L, 0, -0.08*casing_L, casing_W, f"W={casing_W:.2f} m", text_offset=(-0.06*casing_L, 0))
+    _dim_arrow(ax_top, casing_L*0.05, casing_W*0.06, casing_L*0.95, casing_W*0.06, f"L={casing_L:.2f} m", text_offset=(0, casing_W*0.03))
+    _dim_arrow(ax_top, casing_L*0.06, casing_W*0.05, casing_L*0.06, casing_W*0.95, f"W={casing_W:.2f} m", text_offset=(casing_L*0.03, 0))
     ax_top.set_aspect("equal", adjustable="box")
     ax_top.axis("off")
 
@@ -323,8 +333,8 @@ def draw_ga_and_coil_detail(
     ax_side.add_patch(MplCircle(fan_center, radius=fan_diam/2, fill=False, linewidth=2))
     ax_side.text(fan_center[0], fan_center[1], f"FAN\nØ{fan_diam:.2f} m", ha="center", va="center", fontsize=8)
 
-    _dim_arrow(ax_side, 0, -0.12*casing_H, casing_L, -0.12*casing_H, f"L={casing_L:.2f} m", text_offset=(0, -0.06*casing_H))
-    _dim_arrow(ax_side, -0.10*casing_L, 0, -0.10*casing_L, casing_H, f"H={casing_H:.2f} m", text_offset=(-0.07*casing_L, 0))
+    _dim_arrow(ax_side, casing_L*0.05, casing_H*0.06, casing_L*0.95, casing_H*0.06, f"L={casing_L:.2f} m", text_offset=(0, casing_H*0.03))
+    _dim_arrow(ax_side, casing_L*0.06, casing_H*0.05, casing_L*0.06, casing_H*0.95, f"H={casing_H:.2f} m", text_offset=(casing_L*0.03, 0))
     ax_side.set_aspect("equal", adjustable="box")
     ax_side.axis("off")
 
@@ -338,8 +348,8 @@ def draw_ga_and_coil_detail(
                                fill=False, linewidth=2, linestyle="--"))
     ax_end.text(casing_W/2, face_y + min(face_H, casing_H*0.55)/2, "COIL FACE", ha="center", va="center", fontsize=9)
 
-    _dim_arrow(ax_end, 0, -0.12*casing_H, casing_W, -0.12*casing_H, f"W={casing_W:.2f} m", text_offset=(0, -0.06*casing_H))
-    _dim_arrow(ax_end, -0.10*casing_W, 0, -0.10*casing_W, casing_H, f"H={casing_H:.2f} m", text_offset=(-0.07*casing_W, 0))
+    _dim_arrow(ax_end, casing_W*0.05, casing_H*0.06, casing_W*0.95, casing_H*0.06, f"W={casing_W:.2f} m", text_offset=(0, casing_H*0.03))
+    _dim_arrow(ax_end, casing_W*0.06, casing_H*0.05, casing_W*0.06, casing_H*0.95, f"H={casing_H:.2f} m", text_offset=(casing_W*0.03, 0))
     ax_end.set_aspect("equal", adjustable="box")
     ax_end.axis("off")
 
